@@ -106,7 +106,7 @@ out:
 struct sign_hash_elem *new_sign_hash_elem(struct kmem_cache *sign_cahcep)
 {
         struct sign_hash_elem *elem;
-        elem = kmem_cache_alloc(sign_cahcep, GFP_KERNEL);
+        elem = kmem_cache_alloc(sign_cahcep, GFP_ATOMIC);
         if (!elem) {
                 return NULL;
         }

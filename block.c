@@ -31,8 +31,8 @@ static void init_block_ref(struct block_ref *ref)
 struct block_ref *new_block_ref(struct kmem_cache *ref_cachep)
 {
         struct block_ref *ref;
-        ref = kmem_cache_alloc(ref_cachep, GFP_KERNEL);
-        if (ref) {
+        ref = kmem_cache_alloc(ref_cachep, GFP_ATOMIC);
+        if (!ref) {
                 return NULL;
         }
         init_block_ref(ref);
@@ -99,7 +99,7 @@ int choose_cacheblock(struct each_job *job, struct block_info **req_blk)
         struct dm_io_region *dest;
 
         spin_lock(&block_lru_lock);
-        BUG_ON(!list_empty(&block_lru_head));
+        BUG_ON(list_empty(&block_lru_head));
         last = (struct block_info *)list_last_entry(&block_lru_head,
                         struct block_info, lru);
         move_to(&last->lru, &block_lru_head);

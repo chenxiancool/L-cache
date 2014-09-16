@@ -237,10 +237,13 @@ static void insert_into_aht(struct bucket_elem *bkt_elem, struct block_ref *ref)
 
 static void insert_into_refs(struct block_info *blk, struct block_ref *ref)
 {
-        spin_lock(&blk->blk_lock);
+        /*
+        * the caller must make sure blk->blk_lock is locked!!!
+        */
+        //spin_lock(&blk->blk_lock);
         list_add_tail(&ref->ref_list, &blk->refs);
         ++blk->refs_nr;
-        spin_unlock(&blk->blk_lock);
+        //spin_unlock(&blk->blk_lock);
 }
 
 static int insert_aht_and_refs(struct each_job *job)
@@ -260,7 +263,7 @@ static int insert_aht_and_refs(struct each_job *job)
         return 0;
 }
 
-static int insert_sht(struct each_job *job)
+static int insert_sht(struct each_job *job, struct block_info *blk)
 {
         struct sign_hash_elem *sign_hash;
         sign_hash = new_sign_hash_elem(job->ctx_ctrl->sign_elem_cachep);
@@ -268,7 +271,7 @@ static int insert_sht(struct each_job *job)
                 printk("L-CACHE : new_sign_hash_elem failed!");
                 return 1;
         }
-        sign_hash->blk = &job->ctx_ctrl->blks[job->cacher.sector];
+        sign_hash->blk = blk; 
         spin_lock(&job->sht_bkt_elem->lock);
         list_add_tail(&sign_hash->list, &job->sht_bkt_elem->hash_elems);
         job->sign_elem = sign_hash;
@@ -312,7 +315,7 @@ void io_callback(unsigned long err, void *ctx)
                 } else if (job->rw == _JOB_WRITE) {
                         BUG_ON(job->sign_elem); // if not NULL, must be error
                         memcpy(blk->signature, job->tmp_sign, _MD5_LEN);
-                        insert_sht(job);
+                        insert_sht(job, blk);
                         insert_aht_and_refs(job);
                         blk->state = _BLK_FREE;
                         if (blk->private) {
@@ -332,17 +335,20 @@ void io_callback(unsigned long err, void *ctx)
 go_io:
         kmem_cache_free(job->ctx_ctrl->blk_job_cachep, p);
         push_job(job, &job->ctx_ctrl->job_ctrl->io_jobs);
+        wake_jobs(job->ctx_ctrl->job_ctrl);
         return;
 complete:
         kmem_cache_free(job->ctx_ctrl->blk_job_cachep, p);
         push_job(job, &job->ctx_ctrl->job_ctrl->complete_jobs);     // ingore this job
+        wake_jobs(job->ctx_ctrl->job_ctrl);
         return;
 }
 
 int dm_io_async_bvec(unsigned int nr_regions, struct dm_io_region *where, 
                 int rw, struct bio_vec *bvec, io_notify_fn fn, void* ctx)
 {
-        struct each_job *job = (struct each_job *)ctx;
+        struct blk_and_job *p = (struct blk_and_job *)ctx;
+        struct each_job *job = p->job;
         struct cache_ctx_ctrl *ctrl = job->ctx_ctrl;
         struct dm_io_request iorq;
 
@@ -418,7 +424,10 @@ int make_signature(struct each_job *job)
         unsigned int index;
         unsigned int nr_vecs;
 
-        buff = (unsigned char *)vmalloc(ctx->stats.blk_size * to_bytes(SECTOR_SHIFT));
+        // if use vmalloc it will be error, because make_signature may in the
+        // interrupt context
+        buff = (unsigned char *)kmalloc(ctx->stats.blk_size * to_bytes(SECTOR_SHIFT),
+                                GFP_ATOMIC);
         if (!buff) {
                 return 1;       // error
         }
@@ -453,7 +462,7 @@ int make_signature(struct each_job *job)
         crypto_hash_init(&desc);
         crypto_hash_update(&desc, &sg, index);
         crypto_hash_final(&desc, job->tmp_sign);
-        vfree(buff);
+        kfree(buff);
 
         return 0;
 }
@@ -496,18 +505,19 @@ static int io_store(struct each_job *job)
         struct block_info *req_blk;
         struct blk_and_job *p;
 
+        p = kmem_cache_alloc(job->ctx_ctrl->blk_job_cachep, GFP_KERNEL);
+        if (!p) {
+                printk("L-cACHE : blk_job_cachep failed!");
+                spin_unlock(&req_blk->blk_lock);
+                res = -1;
+                goto out;
+        }
+
         if (job->org_bio->bi_rw == WRITE) {
         
         } else {
                 res = choose_cacheblock(job, &req_blk);
                 if (0 == res) {
-                        p = kmem_cache_alloc(job->ctx_ctrl->blk_job_cachep, GFP_KERNEL);
-                        if (!p) {
-                                printk("L-cACHE : blk_job_cachep failed!");
-                                spin_unlock(&req_blk->blk_lock);
-                                res = -1;
-                                goto out;
-                        }
                         p->blk = req_blk;
                         p->job = job;
                         write_to_cache(0,0,p);

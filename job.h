@@ -20,6 +20,7 @@
 #define _JOB_RW_UD 0x00000000
 #define _JOB_READ 0x10000000
 #define _JOB_WRITE 0x20000000
+#define _JOB_SIGN 0x40000000
 
 #define _MD5_LEN 16
 
@@ -76,6 +77,7 @@ struct cache_job_ctrl {
 	struct kmem_cache *job_cache;
 	mempool_t *job_pool;
 
+	struct cache_job_type signature_jobs;
 	struct cache_job_type complete_jobs;
 	struct cache_job_type pages_jobs;
 	struct cache_job_type io_jobs;

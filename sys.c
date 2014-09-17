@@ -64,6 +64,12 @@ L_CACHE_ATTR_RO(blk_bits);
 L_CACHE_ATTR_FUN(blk_mask, blk_mask)
 L_CACHE_ATTR_RO(blk_mask);
 
+static char stats_name[][16] = {
+        "reads", "writes", "aht_hits", "aht_miss",
+        "sht_hits", "sht_miss", "replace", "writeback",
+        "cache_size", "blk_size", "blk_bits", "blk_mask"
+};
+
 // all attributes
 static ssize_t all_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
@@ -76,7 +82,7 @@ static ssize_t all_show(struct kobject *kobj,
 	}
 	elem = &(ctx_ctrl->stats.reads);
 	do {
-		res += sprintf(buf+res, "%lu\n", *elem);
+		res += sprintf(buf+res, "%s : %lu\n", stats_name[index], *elem);
 		++elem;
 		++index;
 	} while (index < (sizeof(struct cache_stats)/sizeof(unsigned long)));

@@ -286,34 +286,17 @@ void io_callback(unsigned long err, void *ctx)
         struct each_job *job = p->job;
         struct block_info *blk = p->blk;
         struct bio *org_bio = job->org_bio;
-        struct bucket_elem *elem;
-        struct sign_hash_elem *sign_elem;
 
-        if (org_bio->bi_rw == READ) {
+        if (bio_data_dir(org_bio) == READ) {
                 if (job->rw == _JOB_READ) {
-                        if (make_signature(job)) {
-                                printk("L-CACHE : make_signature() failed!");
-                                goto complete;
-                        }
-                        elem = find_sht(&job->ctx_ctrl->sign_bkt,
-                                        job->tmp_sign, &sign_elem);
-                        if (!elem) {
-                                printk("L-CACHE : find_sht() something wrong!");
-                                goto complete;
-                        }
-                        job->sign_elem = sign_elem;
-                        job->sht_bkt_elem = elem;
-                        if (!sign_elem) {       // SHT MISS
-                                ++job->ctx_ctrl->stats.sht_miss;
-                                job->rw = _JOB_WRITE;
-                                goto go_io;
-                        } else {        // SHT HIT
-                                ++job->ctx_ctrl->stats.sht_hits;
-                                insert_aht_and_refs(job);
-                                goto complete;
-                        }
+                        job->rw = _JOB_SIGN;
+                        goto go_sign;
+                } else if (job->rw == _JOB_SIGN) {
+                        printk("L-CACHE : _JOB_SIGN must be error!");
+                        goto complete;
                 } else if (job->rw == _JOB_WRITE) {
                         BUG_ON(job->sign_elem); // if not NULL, must be error
+                        BUG_ON(!job->sht_bkt_elem);
                         memcpy(blk->signature, job->tmp_sign, _MD5_LEN);
                         insert_sht(job, blk);
                         insert_aht_and_refs(job);
@@ -331,10 +314,9 @@ void io_callback(unsigned long err, void *ctx)
         } else {        // bio WRITE
                 
         }
-
-go_io:
+go_sign:
         kmem_cache_free(job->ctx_ctrl->blk_job_cachep, p);
-        push_job(job, &job->ctx_ctrl->job_ctrl->io_jobs);
+        push_job(job, &job->ctx_ctrl->job_ctrl->signature_jobs);
         wake_jobs(job->ctx_ctrl->job_ctrl);
         return;
 complete:
@@ -475,15 +457,21 @@ static int io_fetch(struct each_job *job)
 
         p = kmem_cache_alloc(job->ctx_ctrl->blk_job_cachep, GFP_KERNEL);
         if (!p) {
+                printk("L-CACHE : io_fetch(1) return -1");
                 return -1;
         }
-        if (job->org_bio->bi_rw == READ) {
+        if (bio_data_dir(job->org_bio) == READ) {
                 p->blk = NULL;
                 p->job = job;
                 if (!job->ext_bvec.nr_pages) {  // needn't extra pages
                         res = dm_io_async_bvec(1, &job->source, READ,
                                         org_bio->bi_io_vec + _GET_BI_IDX(org_bio),
                                         io_callback, (void *)p);
+
+                        if (res == -1) {
+                                printk("L-CACHE : io_fetch(2) return -1");
+                        }
+
                         return res;
                 } else {
                         if (make_new_bvec(job)) {
@@ -492,6 +480,11 @@ static int io_fetch(struct each_job *job)
                         res = dm_io_async_bvec(1, &job->source, READ,
                                         job->ext_bvec.bvec, io_callback,
                                         (void *)p);
+
+                        if (res == -1) {
+                                printk("L-CACHE : io_fetch(3) return -1");
+                        }
+
                         return res;
                 }
         } else {        // bio WRITE
@@ -513,7 +506,7 @@ static int io_store(struct each_job *job)
                 goto out;
         }
 
-        if (job->org_bio->bi_rw == WRITE) {
+        if (bio_data_dir(job->org_bio) == WRITE) {
         
         } else {
                 res = choose_cacheblock(job, &req_blk);
@@ -530,6 +523,7 @@ static int io_store(struct each_job *job)
                 } else {        // -1 == res, something error
                         // nothing to do, the caller will return -1 to process_jobs,
                         // and process_jobs will push this job to the complete_jobs
+                        printk("L-CACHE : io_store return -1");
                         res = -1;
                 }
         }
@@ -547,11 +541,49 @@ static int io_work(struct each_job *job)
         } else if (job->rw == _JOB_WRITE) {
                 res = io_store(job);
         } else {        // something error
-                printk("L-CACHE : unknown job action!");
+                printk("L-CACHE : io_work cann't handle this job(type:%u)",job->rw);
                 res = -1;
         }
 
         return res;
+}
+
+static int signature_work(struct each_job *job)
+{
+        struct bucket_elem *elem;
+        struct sign_hash_elem *sign_elem;
+
+        BUG_ON(job->rw != _JOB_SIGN);
+        if (make_signature(job)) {
+                printk("L-CACHE : make_signature() failed!");
+                goto complete;
+        }
+        elem = find_sht(&job->ctx_ctrl->sign_bkt,
+                        job->tmp_sign, &sign_elem);
+        if (!elem) {
+                printk("L-CACHE : find_sht() something wrong!");
+                goto complete;
+        }
+        job->sign_elem = sign_elem;
+        job->sht_bkt_elem = elem;
+        if (!sign_elem) {       // SHT MISS
+                ++job->ctx_ctrl->stats.sht_miss;
+                job->rw = _JOB_WRITE;
+                goto go_io;
+        } else {        // SHT HIT
+                ++job->ctx_ctrl->stats.sht_hits;
+                insert_aht_and_refs(job);
+                goto complete;
+        }
+
+go_io:
+        push_job(job, &job->ctx_ctrl->job_ctrl->io_jobs);
+        wake_jobs(job->ctx_ctrl->job_ctrl);
+        return 0;
+complete:
+        push_job(job, &job->ctx_ctrl->job_ctrl->complete_jobs);     // ingore this job
+        wake_jobs(job->ctx_ctrl->job_ctrl);
+        return 0;
 }
 
 static int complete_work(struct each_job *job)
@@ -565,7 +597,7 @@ static int complete_work(struct each_job *job)
                 cache_put_pages(&job->ctx_ctrl->job_ctrl->ext_pages,
                                 job->ext_bvec.pages);
         }
-        
+
         mempool_free(job, job->ctx_ctrl->job_ctrl->job_pool);
 
         return 0;
@@ -591,6 +623,7 @@ void process_jobs(struct cache_job_type *type, job_work fn)
 static void process_all(void)
 {
         struct cache_ctx_ctrl *ctx = ctx_ctrl;  // hey, ctx_ctrl is a global param
+        process_jobs(&ctx->job_ctrl->signature_jobs, signature_work);
         process_jobs(&ctx->job_ctrl->complete_jobs, complete_work);
         process_jobs(&ctx->job_ctrl->pages_jobs, pages_work);
         process_jobs(&ctx->job_ctrl->io_jobs, io_work);
@@ -659,6 +692,7 @@ struct cache_job_ctrl *init_job_ctrl(struct dm_target *ti)
 		goto bad5;
 	}
 
+	init_job_type(&job->signature_jobs);
 	init_job_type(&job->complete_jobs);
 	init_job_type(&job->pages_jobs);
 	init_job_type(&job->io_jobs);

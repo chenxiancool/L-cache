@@ -295,11 +295,13 @@ static int l_cache_map(struct dm_target *ti, struct bio *bio)
 	sector_t start = bi_sector - offset;
 	struct block_ref *aht_hit;
 	struct bucket_elem *elem;
+        int res;
 
 	elem = find_aht(&ctx->addr_bkt, start, &aht_hit);
 	if (!elem) {
 		printk("L-CACHE : find_aht() something wrong!");
-		return DM_MAPIO_SUBMITTED;	// ingore this bio
+		res = DM_MAPIO_SUBMITTED;	// ingore this bio
+                goto out;
 	}
 
 	if (bio_data_dir(bio) == READ) {
@@ -307,10 +309,22 @@ static int l_cache_map(struct dm_target *ti, struct bio *bio)
 		if (!aht_hit) {	// AHT MISS
 			++ctx->stats.aht_miss;
                         aht_miss_read(ctx, bio, elem);
-                        return DM_MAPIO_SUBMITTED;
+                        res = DM_MAPIO_SUBMITTED;
+                        goto out;
 		} else {	// AHT HIT
 			++ctx->stats.aht_hits;
-                        return aht_hit_read(ctx, bio, elem, aht_hit);
+                        //return aht_hit_read(ctx, bio, elem, aht_hit);
+                        res = aht_hit_read(ctx, bio, elem, aht_hit);
+                        if (res == DM_MAPIO_REQUEUE) {
+                                printk("L-CACHE : aht_hit_read REQUEUE\n");
+                        } else if (res == DM_MAPIO_REMAPPED) {
+                                printk("L-CACHE : aht_hit_read REMAPPED\n");
+                        } else if (res == DM_MAPIO_SUBMITTED) {
+                                printk("L-CACHE : aht_hit_read SUBMITTED\n");
+                        } else {
+                                printk("L-CACHE : aht_hit_read unknown\n");
+                        }
+                        goto out;
 		}
 	} else {
 		++ctx->stats.writes;
@@ -325,6 +339,8 @@ static int l_cache_map(struct dm_target *ti, struct bio *bio)
         bio->bi_bdev = ctx->src_dev->bdev;
         return DM_MAPIO_REMAPPED; /////////////
         ////////////////////////////////////////////////
+out:
+        return res;
 }
 
 static struct target_type l_cache_target = {

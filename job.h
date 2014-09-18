@@ -113,6 +113,8 @@ extern void count_holes(struct cache_ctx_ctrl *ctx, struct bio *bio, unsigned in
 
 extern void queue_job(struct each_job *job, struct cache_job_ctrl *job_ctrl);
 
+extern int do_new_write(struct each_job *job, unsigned char *sign);
+
 extern void process_jobs(struct cache_job_type *type, job_work cb_fn);
 
 extern void do_work(struct work_struct *work);

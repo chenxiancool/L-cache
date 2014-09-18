@@ -286,33 +286,40 @@ static int aht_hit_write(struct cache_ctx_ctrl *ctx, struct bio *bio,
         if (ref->blk->state != _BLK_FREE) {
                 spin_unlock(&ref->blk->blk_lock);
                 res = DM_MAPIO_REQUEUE;
-                goto out;
+                goto out1;
         }
         ref->blk->state = _BLK_WRITE;
-        spin_unlock(&ref->blk->blk_lock);
+        spin_lock(&block_lru_lock);
+        move_to(&ref->blk->lru, &block_lru_head);
+        spin_unlock(&block_lru_lock);
         job = new_job(ctx, bio, elem, ref, NULL, NULL);
         if (!job->ext_bvec.nr_pages) {
                 if (make_signature_normal(ctx, bio, sign)) {
                         printk("L-CACHE : aht_hit_write make_signature_normal failed!");
+                        spin_unlock(&ref->blk->blk_lock);
                         res = DM_MAPIO_REQUEUE;
-                        goto out;
+                        goto out1;
                 }
-                if (!memcmp(sign, ref->blk->signature, _MD5_LEN)) {
+                if (!memcmp(sign, ref->blk->signature, _MD5_LEN)) {     // matched
+                        spin_unlock(&ref->blk->blk_lock);
                         job->rw = _JOB_RW_UD;   // the job will push into complete_jobs
-                        queue_job(job, ctx->job_ctrl);
-                        res = DM_MAPIO_SUBMITTED;
-                        goto out;
                 } else {
-                        
+                        if (-1 == do_new_write(job, sign)) {
+                                spin_unlock(&ref->blk->blk_lock);
+                                job->rw = _JOB_RW_UD;
+                        }
                 }
+                res = DM_MAPIO_SUBMITTED;
+                goto out2;
         } else {
                 job->rw = _JOB_READ;
-                queue_job(job, ctx->job_ctrl);
                 res = DM_MAPIO_SUBMITTED;
-                goto out;
+                goto out2;
         }
 
-out:
+out2:
+        queue_job(job, ctx->job_ctrl);
+out1:
 	return res;
 }
 

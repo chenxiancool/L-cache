@@ -501,6 +501,34 @@ int make_signature_by_job(struct each_job *job)
         return 0;
 }
 
+/*
+* return -1 means something error or the job would push into the complete_jobs
+*/
+int do_new_write(struct each_job *job, unsigned char *sign)
+{
+        struct bucket_elem *elem;
+        struct sign_hash_elem *sign_elem;
+
+        elem = find_sht(&job->ctx_ctrl->sign_bkt, sign, &sign_elem);
+        if (!elem) {
+                printk("L-CACHE : find_sht failed in do_new_write!\n");
+                return -1;
+        }
+
+        if (!sign_elem) {       // SHT MISS
+                job->rw = _JOB_WRITE;
+                queue_job(job, job->ctx_ctrl->job_ctrl);
+                return 0;
+        } else {        // SHT HIT
+                list_del(&job->blk_ref->ref_list);
+                spin_lock(&sign_elem->blk->blk_lock);
+                insert_into_refs(sign_elem->blk, job->blk_ref);
+                job->blk_ref->state = _REF_DIRTY;
+                spin_unlock(&sign_elem->blk->blk_lock);
+                return -1;
+        }
+}
+
 static int io_fetch(struct each_job *job)
 {
         int res;

@@ -111,7 +111,8 @@ extern void move_to(struct list_head *entry, struct list_head *new_prev);
 
 extern void write_to_cache(int read_err, unsigned long write_err, void *context);
 
-extern int choose_cacheblock(struct each_job *job, struct block_info **req_blk);
+extern int choose_cacheblock(struct each_job *job, struct block_info *blk,
+                struct block_info **req_blk);
 
 extern unsigned int init_hash_bucket(struct hash_bucket *bkt, 
 		unsigned int size, hash_fun fn);

@@ -296,6 +296,7 @@ static int aht_hit_write(struct cache_ctx_ctrl *ctx, struct bio *bio,
         if (!job->ext_bvec.nr_pages) {
                 if (make_signature_normal(ctx, bio, sign)) {
                         printk("L-CACHE : aht_hit_write make_signature_normal failed!");
+                        ref->blk->state = _BLK_FREE;
                         spin_unlock(&ref->blk->blk_lock);
                         res = DM_MAPIO_REQUEUE;
                         goto out1;
@@ -312,6 +313,9 @@ static int aht_hit_write(struct cache_ctx_ctrl *ctx, struct bio *bio,
                 res = DM_MAPIO_SUBMITTED;
                 goto out2;
         } else {
+                job->ext_bvec.nr_ext_central = dm_div_up(job->ext_bvec.b_central,
+                                PAGE_SIZE);
+                job->ext_bvec.nr_pages += job->ext_bvec.nr_ext_central;
                 job->rw = _JOB_READ;
                 res = DM_MAPIO_SUBMITTED;
                 goto out2;

@@ -75,6 +75,7 @@ void write_to_cache(int read_err, unsigned long write_err, void *context)
                 if (tmp->state == _REF_DIRTY) {
                         --blk->dirty_nr;
                         tmp->state = _REF_CLEAN;        // this isn't necessary
+                        ++ctrl->stats.writeback;
                 }
                 // we will drop this block_ref obj
                 --blk->refs_nr;
@@ -121,20 +122,29 @@ int write_back_refrences(struct block_info *blk, struct dm_io_region *src,
         return 1;
 }
 
-int choose_cacheblock(struct each_job *job, struct block_info **req_blk)
+/*
+* choose a new cache block when blk is NULL
+*/
+int choose_cacheblock(struct each_job *job, struct block_info *blk,
+                struct block_info **req_blk)
 {
         struct list_head *pos;
         struct block_info *last;
         struct block_ref *tmp;
         struct dm_io_region *dest;
 
-        spin_lock(&block_lru_lock);
-        BUG_ON(list_empty(&block_lru_head));
-        last = (struct block_info *)list_last_entry(&block_lru_head,
-                        struct block_info, lru);
-        move_to(&last->lru, &block_lru_head);
-        spin_unlock(&block_lru_lock);
+        if (!blk) {
+                spin_lock(&block_lru_lock);
+                BUG_ON(list_empty(&block_lru_head));
+                last = (struct block_info *)list_last_entry(&block_lru_head,
+                                struct block_info, lru);
+                move_to(&last->lru, &block_lru_head);
+                spin_unlock(&block_lru_lock);
+        } else {
+                last = blk;
+        }
         spin_lock(&last->blk_lock);
+        ++job->ctx_ctrl->stats.replace;
         if (!last->dirty_nr) {  // no dirty refrences
                 *req_blk = last;
                 return 0;       // everything is ok, caller will go on handle this job
@@ -161,7 +171,7 @@ int choose_cacheblock(struct each_job *job, struct block_info **req_blk)
         job->source.count = job->ctx_ctrl->stats.blk_size;
         *req_blk = last;
         // if return 1, the caller don't care this job any more, and the job
-        // will deliver to the choose_callbak .
+        // will deliver to the write_to_cache.
         return write_back_refrences(last, &job->source, last->private,
                         job, write_to_cache); 
 }

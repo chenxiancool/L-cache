@@ -139,8 +139,9 @@ static void count_extra_pages(struct cache_ctx_ctrl *ctx, struct bio *bio,
                 job->ext_bvec.b_tail = tail;
 	}
         job->ext_bvec.b_central = _GET_BI_SIZE(bio);
-	job->ext_bvec.nr_pages = job->ext_bvec.nr_ext_head + job->ext_bvec.nr_ext_tail;
-} 
+        job->ext_bvec.nr_ext_central = 0;       // special usage
+        job->ext_bvec.nr_pages = job->ext_bvec.nr_ext_head + job->ext_bvec.nr_ext_tail;
+}
 
 struct each_job *new_job(struct cache_ctx_ctrl *ctx, struct bio *bio, 
 		struct bucket_elem *aht_elem, struct block_ref *blk_ref,
@@ -299,6 +300,7 @@ void io_callback(unsigned long err, void *ctx)
         struct each_job *job = p->job;
         struct block_info *blk = p->blk;
         struct bio *org_bio = job->org_bio;
+        struct bio tmp_bio;
 
         if (bio_data_dir(org_bio) == READ) {
                 if (job->rw == _JOB_READ) {
@@ -325,7 +327,18 @@ void io_callback(unsigned long err, void *ctx)
                         goto complete;
                 }
         } else {        // bio WRITE
-                
+                if (job->rw == _JOB_WRITE) {
+                        job->blk_ref->state = _REF_DIRTY;
+                        memcpy(job->blk_ref->blk->signature, job->tmp_sign,
+                                        _MD5_LEN);
+                        insert_sht(job, job->blk_ref->blk);
+                        job->blk_ref->blk->state = _BLK_FREE;
+                        spin_unlock(&job->blk_ref->blk->blk_lock);
+                        goto complete;
+                } else if (job->rw == _JOB_READ) {
+                        
+                } else {
+                }
         }
 go_sign:
         kmem_cache_free(job->ctx_ctrl->blk_job_cachep, p);
@@ -368,7 +381,13 @@ static int make_new_bvec(struct each_job *job)
         unsigned int remaining = job->ext_bvec.b_central;
         unsigned int tail = job->ext_bvec.b_tail;
 
-        nr_vecs = org_bio->bi_vcnt - _GET_BI_IDX(org_bio) + job->ext_bvec.nr_pages;
+        if (bio_data_dir(org_bio) == READ) { 
+                nr_vecs = org_bio->bi_vcnt - _GET_BI_IDX(org_bio) 
+                        + job->ext_bvec.nr_pages;
+        } else {
+                nr_vecs = job->ext_bvec.nr_pages;
+        }
+
         bvec = kmalloc(nr_vecs * sizeof(struct bio_vec), GFP_NOIO);
         if (!bvec) {
                 printk("L-CACHE : kmalloc() bio_vec failed!");
@@ -378,18 +397,31 @@ static int make_new_bvec(struct each_job *job)
         pl = job->ext_bvec.pages;
         index = 0;
         while (head) {  // the head part
+                bvec[index].bv_len = min(head, (unsigned int )PAGE_SIZE);
+                bvec[index].bv_offset = 0;
                 bvec[index].bv_page = pl->page;
                 head -= bvec[index].bv_len;
                 pl = pl->next;
                 ++index;
         }
 
-        tmp = _GET_BI_IDX(org_bio);
-        while (remaining) {     // the central part
-                bvec[index] = org_bio->bi_io_vec[tmp];
-                remaining -= bvec[index].bv_len;
-                ++index;
-                ++tmp;
+        if (bio_data_dir(bio) == READ) {
+                tmp = _GET_BI_IDX(org_bio);
+                while (remaining) {     // the central part
+                        bvec[index] = org_bio->bi_io_vec[tmp];
+                        remaining -= bvec[index].bv_len;
+                        ++index;
+                        ++tmp;
+                }
+        } else {
+                while (remaining) {  // the central part
+                        bvec[index].bv_len = min(remaining, (unsigned int )PAGE_SIZE);
+                        bvec[index].bv_offset = 0;
+                        bvec[index].bv_page = pl->page;
+                        remaining -= bvec[index].bv_len;
+                        pl = pl->next;
+                        ++index;
+                }
         }
 
         while (tail) {  // the tail part
@@ -516,6 +548,7 @@ int do_new_write(struct each_job *job, unsigned char *sign)
         }
 
         if (!sign_elem) {       // SHT MISS
+                memcpy(job->tmp_sign, sign, _MD5_LEN);
                 job->rw = _JOB_WRITE;
                 queue_job(job, job->ctx_ctrl->job_ctrl);
                 return 0;
@@ -524,6 +557,7 @@ int do_new_write(struct each_job *job, unsigned char *sign)
                 spin_lock(&sign_elem->blk->blk_lock);
                 insert_into_refs(sign_elem->blk, job->blk_ref);
                 job->blk_ref->state = _REF_DIRTY;
+                job->blk_ref->blk->state = _BLK_FREE;
                 spin_unlock(&sign_elem->blk->blk_lock);
                 return -1;
         }
@@ -568,7 +602,20 @@ static int io_fetch(struct each_job *job)
                         return res;
                 }
         } else {        // bio WRITE
+                BUG_ON(!job->ext_bvec.nr_pages);
 
+                if (make_new_bvec(job)) {
+                        return 1;       // the job will push back  
+                }
+                res = dm_io_async_bvec(1, &job->source, READ,
+                                job->ext_bvec.bvec, io_callback,
+                                (void *)p);
+
+                if (res == -1) {
+                        printk("L-CACHE : io_fetch(4) return -1");
+                }
+
+                return res;
         }
 }
 
@@ -578,34 +625,33 @@ static int io_store(struct each_job *job)
         struct block_info *req_blk;
         struct blk_and_job *p;
 
-        p = kmem_cache_alloc(job->ctx_ctrl->blk_job_cachep, GFP_KERNEL);
-        if (!p) {
-                printk("L-cACHE : blk_job_cachep failed!");
-                spin_unlock(&req_blk->blk_lock);
-                res = -1;
-                goto out;
-        }
-
         if (bio_data_dir(job->org_bio) == WRITE) {
-        
+                res = choose_cacheblock(job, job->blk_ref->blk, &req_blk);
         } else {
-                res = choose_cacheblock(job, &req_blk);
-                if (0 == res) {
-                        p->blk = req_blk;
-                        p->job = job;
-                        write_to_cache(0,0,p);
-                } else if (1 == res) {
-                        // while choose_cacheblock return 1 means we needn't care
-                        // this job any more, it delivered to other function, but
-                        // this also means the job works well, so io_store should
-                        // reutrn 0
-                        res = 0;
-                } else {        // -1 == res, something error
-                        // nothing to do, the caller will return -1 to process_jobs,
-                        // and process_jobs will push this job to the complete_jobs
-                        printk("L-CACHE : io_store return -1");
+                res = choose_cacheblock(job, NULL, &req_blk);
+        }
+        if (0 == res) {
+                p = kmem_cache_alloc(job->ctx_ctrl->blk_job_cachep, GFP_KERNEL);
+                if (!p) {
+                        printk("L-CACHE : blk_job_cachep failed!");
+                        spin_unlock(&req_blk->blk_lock);
                         res = -1;
+                        goto out;
                 }
+                p->blk = job->blk_ref->blk;
+                p->job = job;
+                write_to_cache(0,0,p);
+        } else if (1 == res) {
+                // while choose_cacheblock return 1 means we needn't care
+                // this job any more, it delivered to other function, but
+                // this also means the job works well, so io_store should
+                // reutrn 0
+                res = 0;
+        } else {        // -1 == res, something error
+                // nothing to do, the caller will return -1 to process_jobs,
+                // and process_jobs will push this job to the complete_jobs
+                printk("L-CACHE : io_store return -1");
+                res = -1;
         }
 
 out:

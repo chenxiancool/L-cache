@@ -7,4 +7,4 @@ default :
 	make -C $(KERNELBUILD) M=$(shell pwd) modules
 
 clean :
-	rm -rf *.o *.mod.c *.order *.symvers .*.cmd .tmp*
+	rm -rf *.o *.ko *.mod.c *.order *.symvers .*.cmd .tmp*

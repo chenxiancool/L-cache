@@ -48,14 +48,44 @@ void move_to(struct list_head *entry, struct list_head *new_prev)
         list_add(entry, new_prev);
 }
 
+/*
+* if call write_to_cache directly , it must make sure there hasn't dirty refrences
+* in this block's refs list;
+*
+* if call write_to_cache as the callback fun by write_back_refrences , then the 
+* caller(such as write_back_refrences) should write back all dirty refrences.
+*
+* NOTE ! we must destroy the block_ref obj in this function , because we write new
+* data to this block .
+*/
 void write_to_cache(int read_err, unsigned long write_err, void *context)
 {
         struct blk_and_job *p= (struct blk_and_job*)context;
         struct cache_ctx_ctrl *ctrl = p->job->ctx_ctrl;
         struct each_job *job = p->job;
+        struct bucket_elem *bkt_elem = job->aht_bkt_elem;
         struct block_info *blk = p->blk;
+        struct list_head *pos;
+        struct block_ref *tmp;
 
-        blk->dirty_nr = 0;
+        BUG_ON(!bkt_elem);
+        list_for_each(pos, &blk->refs) {
+                tmp = (struct block_ref *)container_of(pos,
+                                struct block_ref, ref_list);
+                if (tmp->state == _REF_DIRTY) {
+                        --blk->dirty_nr;
+                        tmp->state = _REF_CLEAN;        // this isn't necessary
+                }
+                // we will drop this block_ref obj
+                --blk->refs_nr;
+                spin_lock(&bkt_elem->lock);
+                list_del(&tmp->hash_list);
+                spin_unlock(&bkt_elem->lock);
+                list_del(&tmp->ref_list);
+                kmem_cache_free(ctrl->blk_ref_cachep, tmp);
+        }
+
+        BUG_ON(blk->dirty_nr != 0);
         blk->state = _BLK_FREE;
 
         job->cacher.bdev = ctrl->cache_dev->bdev;

@@ -435,7 +435,7 @@ int make_signature(struct each_job *job)
         }
 
         /* for debug message*/
-        printk("L-CACHE : make_signature index=%u", index);
+        //printk("L-CACHE : make_signature index=%u", index);
 
         desc.tfm = ctx->tfm;
         desc.flags = 0;

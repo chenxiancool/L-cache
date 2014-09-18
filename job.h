@@ -108,12 +108,18 @@ extern int dm_io_async_bvec(unsigned int nr_regions, struct dm_io_region *where,
 
 extern void free_job_ctrl(struct cache_job_ctrl *job);
 
+extern void count_holes(struct cache_ctx_ctrl *ctx, struct bio *bio, unsigned int *head,
+                unsigned int *tail, sector_t *rest);
+
 extern void queue_job(struct each_job *job, struct cache_job_ctrl *job_ctrl);
 
 extern void process_jobs(struct cache_job_type *type, job_work cb_fn);
 
 extern void do_work(struct work_struct *work);
 
-extern int make_signature(struct each_job *job);
+extern int make_signature_normal(struct cache_ctx_ctrl *ctrl, struct bio *bio,
+                unsigned char *result);
+
+extern int make_signature_by_job(struct each_job *job);
 
 #endif

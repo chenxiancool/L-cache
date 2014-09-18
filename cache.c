@@ -270,13 +270,50 @@ static int aht_miss_read(struct cache_ctx_ctrl *ctx, struct bio *bio,
         job = new_job(ctx, bio, elem, NULL, NULL, NULL);
         job->rw = _JOB_READ;
         queue_job(job, ctx->job_ctrl);
-	return 0;
+	return DM_MAPIO_SUBMITTED;
 }
 
 static int aht_hit_write(struct cache_ctx_ctrl *ctx, struct bio *bio,
 		struct bucket_elem *elem, struct block_ref *ref)
 {
-	return 0;
+        int res;
+        struct each_job *job;
+        unsigned char sign[_MD5_LEN]; 
+
+        BUG_ON(!ref);
+        BUG_ON(!ref->blk);
+        spin_lock(&ref->blk->blk_lock);
+        if (ref->blk->state != _BLK_FREE) {
+                spin_unlock(&ref->blk->blk_lock);
+                res = DM_MAPIO_REQUEUE;
+                goto out;
+        }
+        ref->blk->state = _BLK_WRITE;
+        spin_unlock(&ref->blk->blk_lock);
+        job = new_job(ctx, bio, elem, ref, NULL, NULL);
+        if (!job->ext_bvec.nr_pages) {
+                if (make_signature_normal(ctx, bio, sign)) {
+                        printk("L-CACHE : aht_hit_write make_signature_normal failed!");
+                        res = DM_MAPIO_REQUEUE;
+                        goto out;
+                }
+                if (!memcmp(sign, ref->blk->signature, _MD5_LEN)) {
+                        job->rw = _JOB_RW_UD;   // the job will push into complete_jobs
+                        queue_job(job, ctx->job_ctrl);
+                        res = DM_MAPIO_SUBMITTED;
+                        goto out;
+                } else {
+                        
+                }
+        } else {
+                job->rw = _JOB_READ;
+                queue_job(job, ctx->job_ctrl);
+                res = DM_MAPIO_SUBMITTED;
+                goto out;
+        }
+
+out:
+	return res;
 }
 
 static int aht_miss_write(struct cache_ctx_ctrl *ctx, struct bio *bio,
@@ -285,8 +322,6 @@ static int aht_miss_write(struct cache_ctx_ctrl *ctx, struct bio *bio,
 	return 0;
 }
 
-
-////////////
 static int l_cache_map(struct dm_target *ti, struct bio *bio)
 {
 	struct cache_ctx_ctrl *ctx = (struct cache_ctx_ctrl *)ti->private;
@@ -308,22 +343,12 @@ static int l_cache_map(struct dm_target *ti, struct bio *bio)
 		++ctx->stats.reads;
 		if (!aht_hit) {	// AHT MISS
 			++ctx->stats.aht_miss;
-                        aht_miss_read(ctx, bio, elem);
-                        res = DM_MAPIO_SUBMITTED;
+                        res = aht_miss_read(ctx, bio, elem);
                         goto out;
 		} else {	// AHT HIT
 			++ctx->stats.aht_hits;
                         //return aht_hit_read(ctx, bio, elem, aht_hit);
                         res = aht_hit_read(ctx, bio, elem, aht_hit);
-                        if (res == DM_MAPIO_REQUEUE) {
-                                printk("L-CACHE : aht_hit_read REQUEUE\n");
-                        } else if (res == DM_MAPIO_REMAPPED) {
-                                printk("L-CACHE : aht_hit_read REMAPPED\n");
-                        } else if (res == DM_MAPIO_SUBMITTED) {
-                                printk("L-CACHE : aht_hit_read SUBMITTED\n");
-                        } else {
-                                printk("L-CACHE : aht_hit_read unknown\n");
-                        }
                         goto out;
 		}
 	} else {
@@ -332,6 +357,8 @@ static int l_cache_map(struct dm_target *ti, struct bio *bio)
 			++ctx->stats.aht_miss;
 		} else {	// AHT HIT
 			++ctx->stats.aht_hits;
+                        res = aht_hit_write(ctx, bio, elem, aht_hit);
+                        goto out;
 		}
 	}
 

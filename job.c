@@ -98,24 +98,33 @@ static unsigned int alloc_extra_pages(struct extra_pages *ext, unsigned int nr)
 	return 0;
 }
 
-static void count_extra_pages(struct cache_ctx_ctrl *ctx, struct bio *bio, 
-		struct each_job *job)
+void count_holes(struct cache_ctx_ctrl *ctx, struct bio *bio, unsigned int *head,
+                unsigned int *tail, sector_t *rest)
 {
 	sector_t bi_sector = _GET_BI_SECTOR(bio);
 	sector_t offset = bi_sector & ctx->stats.blk_mask;
 	sector_t start = bi_sector - offset;
+
+	*head = to_bytes(offset);
+	*rest = (ctx->src_dev->bdev->bd_inode->i_size >> SECTOR_SHIFT) - start;
+	if (*rest < ctx->stats.blk_size) {
+		*tail = to_bytes(*rest) - _GET_BI_SIZE(bio) - *head;
+	} else {
+		*tail = to_bytes(ctx->stats.blk_size) - _GET_BI_SIZE(bio) - *head;
+	}
+}
+
+static void count_extra_pages(struct cache_ctx_ctrl *ctx, struct bio *bio, 
+		struct each_job *job)
+{
 	sector_t rest;
 	unsigned int tail, head;
 
-	head = to_bytes(offset);
-	rest = (ctx->src_dev->bdev->bd_inode->i_size >> SECTOR_SHIFT) - start;
-	if (rest < ctx->stats.blk_size) {
-		tail = to_bytes(rest) - _GET_BI_SIZE(bio) - head;
+        count_holes(ctx, bio, &head, &tail, &rest);
+        if (rest < ctx->stats.blk_size) {
 		job->source.count = rest;
 		job->cacher.count = rest;
-	} else {
-		tail = to_bytes(ctx->stats.blk_size) - _GET_BI_SIZE(bio) - head;
-	}
+        }
 
 	if (!head && !tail) {
 		job->ext_bvec.nr_pages = 0;
@@ -151,7 +160,7 @@ struct each_job *new_job(struct cache_ctx_ctrl *ctx, struct bio *bio,
 	job->source.count = ctx->stats.blk_size;
 	job->cacher.bdev = ctx->cache_dev->bdev;
         if (blk_ref)
-	        job->cacher.sector = blk_ref->blk->blk_no;
+	        job->cacher.sector = blk_ref->blk->blk_no << ctx->stats.blk_bits;
         else
                 job->cacher.sector = -1;
 	job->cacher.count = ctx->stats.blk_size;
@@ -205,10 +214,14 @@ static inline void wake_jobs(struct cache_job_ctrl *job_ctrl)
 void queue_job(struct each_job *job, struct cache_job_ctrl *job_ctrl)
 {
         atomic_inc(&job_ctrl->nr_jobs);
-        if (job->ext_bvec.nr_pages) {
-                push_job(job, &job_ctrl->pages_jobs);
+        if (job->rw != _JOB_RW_UD) {
+                if (job->ext_bvec.nr_pages) {
+                        push_job(job, &job_ctrl->pages_jobs);
+                } else {
+                        push_job(job, &job_ctrl->io_jobs);
+                }
         } else {
-                push_job(job, &job_ctrl->io_jobs);
+                push_job(job, &job_ctrl->complete_jobs);
         }
         wake_jobs(job_ctrl);
 }
@@ -393,7 +406,46 @@ static int make_new_bvec(struct each_job *job)
         return 0;
 }
 
-int make_signature(struct each_job *job)
+int make_signature_normal(struct cache_ctx_ctrl *ctrl, struct bio *bio,
+                unsigned char *result)
+{
+        struct scatterlist sg;
+        struct hash_desc desc;
+        struct bio_vec *bv;
+        int i;
+        unsigned char *p;
+        unsigned char *buff;
+        unsigned int index;
+        unsigned int nr_vecs;
+
+        // if use vmalloc it will be error, because make_signature may in the
+        // interrupt context
+        buff = (unsigned char *)kmalloc(ctx->stats.blk_size * to_bytes(SECTOR_SHIFT),
+                                GFP_ATOMIC);
+        if (!buff) {
+                return 1;       // error
+        }
+
+        index = 0;
+        bio_for_each_segment(bv, bio, i) {
+                p = (unsigned char *)kmap(bv->bv_page);
+                memcpy(buff+index, p+bv->bv_offset, bv->bv_len);
+                index += bv->bv_len;
+                kunmap(bv->bv_page);
+        }
+        desc.tfm = ctx->tfm;
+        desc.flags = 0;
+        memset(result, 0, _MD5_LEN);
+        sg_init_one(&sg, buff, index);
+        crypto_hash_init(&desc);
+        crypto_hash_update(&desc, &sg, index);
+        crypto_hash_final(&desc, result);
+        kfree(buff);
+
+        return 0;
+}
+
+int make_signature_by_job(struct each_job *job)
 {
         struct scatterlist sg;
         struct hash_desc desc;
@@ -554,7 +606,7 @@ static int signature_work(struct each_job *job)
         struct sign_hash_elem *sign_elem;
 
         BUG_ON(job->rw != _JOB_SIGN);
-        if (make_signature(job)) {
+        if (make_signature_by_job(job)) {
                 printk("L-CACHE : make_signature() failed!");
                 goto complete;
         }

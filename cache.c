@@ -342,7 +342,33 @@ out1:
 static int aht_miss_write(struct cache_ctx_ctrl *ctx, struct bio *bio,
 		struct bucket_elem *elem)
 {
-	return 0;
+        struct list_head *pos;
+        struct block_info *tmp;
+        struct block_ref *ref;
+
+        spin_lock(&block_lru_lock);
+        list_for_each_prev(pos, &block_lru_head) {
+                tmp = container_of(pos, struct block_info, lru);
+                BUG_ON(!tmp);
+                if (tmp->state == _BLK_FREE) {
+                        spin_lock(&tmp->blk_lock);
+                        break;
+                }
+        }
+        spin_unlock(&block_lru_lock);
+        if (pos == &block_lru_head) {
+                // this means all blocks are busy
+                return DM_MAPIO_REQUEUE;
+        }
+        ref = new_block_ref(ctx->blk_ref_cachep);
+        if (!ref) {
+                spin_unlock(&tmp->blk_lock);
+                return DM_MAPIO_REQUEUE;
+        }
+        ref->blk = tmp;
+        spin_unlock(&tmp->blk_lock);
+
+	return aht_hit_write(ctx, bio, elem, ref);
 }
 
 static int l_cache_map(struct dm_target *ti, struct bio *bio)
@@ -378,6 +404,8 @@ static int l_cache_map(struct dm_target *ti, struct bio *bio)
 		++ctx->stats.writes;
 		if (!aht_hit) {	// AHT MISS
 			++ctx->stats.aht_miss;
+                        res = aht_miss_write(ctx, bio, elem);
+                        goto out;
 		} else {	// AHT HIT
 			++ctx->stats.aht_hits;
                         res = aht_hit_write(ctx, bio, elem, aht_hit);
@@ -385,10 +413,6 @@ static int l_cache_map(struct dm_target *ti, struct bio *bio)
 		}
 	}
 
-        //////////////////////////////////////////////// will delete when complete this project
-        bio->bi_bdev = ctx->src_dev->bdev;
-        return DM_MAPIO_REMAPPED; /////////////
-        ////////////////////////////////////////////////
 out:
         return res;
 }

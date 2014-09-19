@@ -611,10 +611,12 @@ int do_new_write(struct each_job *job, unsigned char *sign)
         job->sign_elem = sign_elem;
         job->sht_bkt_elem = elem;
         if (!sign_elem) {       // SHT MISS
+                ++job->ctx_ctrl->stats.sht_miss;
                 memcpy(job->tmp_sign, sign, _MD5_LEN);
                 job->rw = _JOB_WRITE;
                 return 0;
         } else {        // SHT HIT
+                ++job->ctx_ctrl->stats.sht_hits;
                 list_del(&job->blk_ref->ref_list);
                 spin_lock(&sign_elem->blk->blk_lock);
                 if (sign_elem->blk->state != _BLK_FREE) {

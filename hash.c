@@ -112,6 +112,7 @@ struct sign_hash_elem *new_sign_hash_elem(struct kmem_cache *sign_cahcep)
         }
         elem->blk = NULL;
         INIT_LIST_HEAD(&elem->list);
+        return elem;
 }
 
 /*

@@ -277,7 +277,7 @@ static int aht_hit_write(struct cache_ctx_ctrl *ctx, struct bio *bio,
 		struct bucket_elem *elem, struct block_ref *ref)
 {
         int res;
-        struct each_job *job;
+        struct each_job *job = NULL;
         unsigned char sign[_MD5_LEN]; 
 
         BUG_ON(!ref);
@@ -304,14 +304,23 @@ static int aht_hit_write(struct cache_ctx_ctrl *ctx, struct bio *bio,
                 if (!memcmp(sign, ref->blk->signature, _MD5_LEN)) {     // matched
                         spin_unlock(&ref->blk->blk_lock);
                         job->rw = _JOB_RW_UD;   // the job will push into complete_jobs
+                        res = DM_MAPIO_SUBMITTED;
+                        goto out2;
                 } else {
-                        if (-1 == do_new_write(job, sign)) {
+                        res = do_new_write(job, sign);
+                        if (-1 == res) {
                                 spin_unlock(&ref->blk->blk_lock);
                                 job->rw = _JOB_RW_UD;
+                                res = DM_MAPIO_SUBMITTED;
+                                goto out2;
+                        } else if (1 == res) {
+                                res = DM_MAPIO_REQUEUE; 
+                                goto out1;
+                        } else {        // res == 0
+                                res = DM_MAPIO_SUBMITTED; 
+                                goto out2;
                         }
                 }
-                res = DM_MAPIO_SUBMITTED;
-                goto out2;
         } else {
                 job->ext_bvec.nr_ext_central = dm_div_up(job->ext_bvec.b_central,
                                 PAGE_SIZE);
@@ -323,7 +332,10 @@ static int aht_hit_write(struct cache_ctx_ctrl *ctx, struct bio *bio,
 
 out2:
         queue_job(job, ctx->job_ctrl);
+        return res;
 out1:
+        if (!job)
+                mempool_free(job, ctx->job_ctrl->job_pool);
 	return res;
 }
 

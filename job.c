@@ -300,7 +300,6 @@ void io_callback(unsigned long err, void *ctx)
         struct each_job *job = p->job;
         struct block_info *blk = p->blk;
         struct bio *org_bio = job->org_bio;
-        struct bio tmp_bio;
 
         if (bio_data_dir(org_bio) == READ) {
                 if (job->rw == _JOB_READ) {
@@ -336,8 +335,14 @@ void io_callback(unsigned long err, void *ctx)
                         spin_unlock(&job->blk_ref->blk->blk_lock);
                         goto complete;
                 } else if (job->rw == _JOB_READ) {
-                        
+                        job->rw = _JOB_SIGN;
+                        goto go_sign;
+                } else if (job->rw == _JOB_SIGN) {
+                        printk("L-CACHE : _JOB_SIGN must be error(2)!");
+                        goto complete;
                 } else {
+                        printk("L-CACHE : io_callback() error(2)!");
+                        goto complete;
                 }
         }
 go_sign:
@@ -405,7 +410,7 @@ static int make_new_bvec(struct each_job *job)
                 ++index;
         }
 
-        if (bio_data_dir(bio) == READ) {
+        if (bio_data_dir(org_bio) == READ) {
                 tmp = _GET_BI_IDX(org_bio);
                 while (remaining) {     // the central part
                         bvec[index] = org_bio->bi_io_vec[tmp];
@@ -448,11 +453,10 @@ int make_signature_normal(struct cache_ctx_ctrl *ctrl, struct bio *bio,
         unsigned char *p;
         unsigned char *buff;
         unsigned int index;
-        unsigned int nr_vecs;
 
         // if use vmalloc it will be error, because make_signature may in the
         // interrupt context
-        buff = (unsigned char *)kmalloc(ctx->stats.blk_size * to_bytes(SECTOR_SHIFT),
+        buff = (unsigned char *)kmalloc(ctrl->stats.blk_size * to_bytes(SECTOR_SHIFT),
                                 GFP_ATOMIC);
         if (!buff) {
                 return 1;       // error
@@ -465,7 +469,7 @@ int make_signature_normal(struct cache_ctx_ctrl *ctrl, struct bio *bio,
                 index += bv->bv_len;
                 kunmap(bv->bv_page);
         }
-        desc.tfm = ctx->tfm;
+        desc.tfm = ctrl->tfm;
         desc.flags = 0;
         memset(result, 0, _MD5_LEN);
         sg_init_one(&sg, buff, index);
@@ -477,30 +481,17 @@ int make_signature_normal(struct cache_ctx_ctrl *ctrl, struct bio *bio,
         return 0;
 }
 
-int make_signature_by_job(struct each_job *job)
+static int make_signature_read_bio(struct each_job *job, unsigned char *buff)
 {
-        struct scatterlist sg;
-        struct hash_desc desc;
-        struct cache_ctx_ctrl *ctx = job->ctx_ctrl;
         struct bio *org_bio = job->org_bio;
         struct bio_vec *bv;
         int i;
         unsigned char *p;
-        unsigned char *buff;
         unsigned int index;
         unsigned int nr_vecs;
-
-        // if use vmalloc it will be error, because make_signature may in the
-        // interrupt context
-        buff = (unsigned char *)kmalloc(ctx->stats.blk_size * to_bytes(SECTOR_SHIFT),
-                                GFP_ATOMIC);
-        if (!buff) {
-                return 1;       // error
-        }
-
         index = 0;
         if (!job->ext_bvec.nr_pages) {
-                bio_for_each_segment(bv, job->org_bio, i) {
+                bio_for_each_segment(bv, org_bio, i) {
                         p = (unsigned char *)kmap(bv->bv_page);
                         memcpy(buff+index, p+bv->bv_offset, bv->bv_len);
                         index += bv->bv_len;
@@ -518,15 +509,86 @@ int make_signature_by_job(struct each_job *job)
                 }
         }
 
+        return index;
+}
+
+static int make_signature_write_bio(struct each_job *job, unsigned char *buff)
+{
+        struct bio *org_bio = job->org_bio;
+        struct bio_vec *bv;
+        int i, tmp;
+        unsigned char *p;
+        unsigned int index;
+        unsigned int head, remaining, tail;
+
+        index = 0;
+        i = 0;
+        head = job->ext_bvec.nr_ext_head;
+        while (head) {
+                bv = &job->ext_bvec.bvec[i];
+                p = (unsigned char *)kmap(bv->bv_page);
+                memcpy(buff+index, p+bv->bv_offset, bv->bv_len);
+                index += bv->bv_len;
+                head -= bv->bv_len;
+                kunmap(bv->bv_page);
+                ++i;
+        }
+        remaining = job->ext_bvec.nr_ext_central;
+        while (remaining) {
+                bio_for_each_segment(bv, org_bio, tmp) {
+                        p = (unsigned char *)kmap(bv->bv_page);
+                        memcpy(buff+index, p+bv->bv_offset, bv->bv_len);
+                        index += bv->bv_len;
+                        remaining -= bv->bv_len;
+                        kunmap(bv->bv_page);
+                        ++i;
+                }
+        }
+        tail = job->ext_bvec.nr_ext_tail;
+        while (tail) {
+                bv = &job->ext_bvec.bvec[i];
+                p = (unsigned char *)kmap(bv->bv_page);
+                memcpy(buff+index, p+bv->bv_offset, bv->bv_len);
+                index += bv->bv_len;
+                tail -= bv->bv_len;
+                kunmap(bv->bv_page);
+                ++i;
+        }
+
+        return index;
+}
+
+int make_signature_by_job(struct each_job *job)
+{
+        struct scatterlist sg;
+        struct hash_desc desc;
+        struct cache_ctx_ctrl *ctx = job->ctx_ctrl;
+        struct bio *org_bio = job->org_bio;
+        unsigned char *buff;
+        unsigned int len;
+
+        // if use vmalloc it will be error, because make_signature may in the
+        // interrupt context
+        buff = (unsigned char *)kmalloc(ctx->stats.blk_size * to_bytes(SECTOR_SHIFT),
+                                GFP_ATOMIC);
+        if (!buff) {
+                return 1;       // error
+        }
+        if (bio_data_dir(org_bio) == READ){
+                len = make_signature_read_bio(job, buff);
+        } else {
+                len = make_signature_write_bio(job, buff);
+        }
+
         /* for debug message*/
         //printk("L-CACHE : make_signature index=%u", index);
 
         desc.tfm = ctx->tfm;
         desc.flags = 0;
         memset(job->tmp_sign, 0, _MD5_LEN);
-        sg_init_one(&sg, buff, index);
+        sg_init_one(&sg, buff, len);
         crypto_hash_init(&desc);
-        crypto_hash_update(&desc, &sg, index);
+        crypto_hash_update(&desc, &sg, len);
         crypto_hash_final(&desc, job->tmp_sign);
         kfree(buff);
 
@@ -550,11 +612,14 @@ int do_new_write(struct each_job *job, unsigned char *sign)
         if (!sign_elem) {       // SHT MISS
                 memcpy(job->tmp_sign, sign, _MD5_LEN);
                 job->rw = _JOB_WRITE;
-                queue_job(job, job->ctx_ctrl->job_ctrl);
                 return 0;
         } else {        // SHT HIT
                 list_del(&job->blk_ref->ref_list);
                 spin_lock(&sign_elem->blk->blk_lock);
+                if (sign_elem->blk->state != _BLK_FREE) {
+                        spin_unlock(&sign_elem->blk->blk_lock);
+                        return 1;
+                }
                 insert_into_refs(sign_elem->blk, job->blk_ref);
                 job->blk_ref->state = _REF_DIRTY;
                 job->blk_ref->blk->state = _BLK_FREE;
@@ -678,11 +743,18 @@ static int signature_work(struct each_job *job)
 {
         struct bucket_elem *elem;
         struct sign_hash_elem *sign_elem;
+        struct bio *org_bio = job->org_bio;
 
         BUG_ON(job->rw != _JOB_SIGN);
         if (make_signature_by_job(job)) {
                 printk("L-CACHE : make_signature() failed!");
                 goto complete;
+        }
+        if (bio_data_dir(org_bio) == WRITE) {
+                if (!memcmp(job->blk_ref->blk->signature, job->tmp_sign, _MD5_LEN)) {
+                       spin_unlock(&job->blk_ref->blk->blk_lock);
+                       goto complete;
+                }
         }
         elem = find_sht(&job->ctx_ctrl->sign_bkt,
                         job->tmp_sign, &sign_elem);
@@ -692,16 +764,40 @@ static int signature_work(struct each_job *job)
         }
         job->sign_elem = sign_elem;
         job->sht_bkt_elem = elem;
-        if (!sign_elem) {       // SHT MISS
-                ++job->ctx_ctrl->stats.sht_miss;
-                job->rw = _JOB_WRITE;
-                goto go_io;
-        } else {        // SHT HIT
-                ++job->ctx_ctrl->stats.sht_hits;
-                insert_aht_and_refs(job);
-                goto complete;
+        if (bio_data_dir(org_bio) == READ) {
+                if (!sign_elem) {       // SHT MISS
+                        ++job->ctx_ctrl->stats.sht_miss;
+                        job->rw = _JOB_WRITE;
+                        goto go_io;
+                } else {        // SHT HIT
+                        ++job->ctx_ctrl->stats.sht_hits;
+                        insert_aht_and_refs(job);
+                        goto complete;
+                }
+        } else {
+                if (!sign_elem) {       // SHT MISS
+                        ++job->ctx_ctrl->stats.sht_miss;
+                        job->rw = _JOB_WRITE;
+                        goto go_io;
+                } else {        // SHT HIT
+                        ++job->ctx_ctrl->stats.sht_hits;
+                        list_del(&job->blk_ref->ref_list);
+                        spin_lock(&sign_elem->blk->blk_lock);
+                        if (sign_elem->blk->state != _BLK_FREE) {
+                                spin_unlock(&sign_elem->blk->blk_lock);
+                                goto go_sign;
+                        }
+                        insert_into_refs(sign_elem->blk, job->blk_ref);
+                        job->blk_ref->state = _REF_DIRTY;
+                        job->blk_ref->blk->state = _BLK_FREE;
+                        spin_unlock(&sign_elem->blk->blk_lock);
+                        goto complete;
+                }
         }
-
+go_sign:
+        push_job(job, &job->ctx_ctrl->job_ctrl->signature_jobs);
+        wake_jobs(job->ctx_ctrl->job_ctrl);
+        return 0;
 go_io:
         push_job(job, &job->ctx_ctrl->job_ctrl->io_jobs);
         wake_jobs(job->ctx_ctrl->job_ctrl);

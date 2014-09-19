@@ -66,12 +66,17 @@ void write_to_cache(int read_err, unsigned long write_err, void *context)
         struct bucket_elem *bkt_elem = job->aht_bkt_elem;
         struct block_info *blk = p->blk;
         struct list_head *pos;
+        struct list_head *oth;
         struct block_ref *tmp;
 
         BUG_ON(!bkt_elem);
-        list_for_each(pos, &blk->refs) {
+        list_for_each_safe(pos, oth, &blk->refs) {
                 tmp = (struct block_ref *)container_of(pos,
                                 struct block_ref, ref_list);
+                // specially when bio is write
+                if (tmp == job->blk_ref)
+                        continue;
+
                 if (tmp->state == _REF_DIRTY) {
                         --blk->dirty_nr;
                         tmp->state = _REF_CLEAN;        // this isn't necessary
@@ -140,10 +145,10 @@ int choose_cacheblock(struct each_job *job, struct block_info *blk,
                                 struct block_info, lru);
                 move_to(&last->lru, &block_lru_head);
                 spin_unlock(&block_lru_lock);
+                spin_lock(&last->blk_lock);
         } else {
                 last = blk;
         }
-        spin_lock(&last->blk_lock);
         ++job->ctx_ctrl->stats.replace;
         if (!last->dirty_nr) {  // no dirty refrences
                 *req_blk = last;
@@ -159,6 +164,10 @@ int choose_cacheblock(struct each_job *job, struct block_info *blk,
         list_for_each(pos, &last->refs) {
                 tmp = (struct block_ref *)container_of(pos,
                                 struct block_ref, ref_list);
+                // specially when bio is write
+                if (tmp == job->blk_ref)
+                        continue;
+
                 if (tmp->state == _REF_DIRTY) {
                         dest->bdev = job->ctx_ctrl->src_dev->bdev;
                         dest->sector = tmp->src_sector;

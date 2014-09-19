@@ -608,7 +608,8 @@ int do_new_write(struct each_job *job, unsigned char *sign)
                 printk("L-CACHE : find_sht failed in do_new_write!\n");
                 return -1;
         }
-
+        job->sign_elem = sign_elem;
+        job->sht_bkt_elem = elem;
         if (!sign_elem) {       // SHT MISS
                 memcpy(job->tmp_sign, sign, _MD5_LEN);
                 job->rw = _JOB_WRITE;
@@ -620,7 +621,8 @@ int do_new_write(struct each_job *job, unsigned char *sign)
                         spin_unlock(&sign_elem->blk->blk_lock);
                         return 1;
                 }
-                insert_into_refs(sign_elem->blk, job->blk_ref);
+                //already in refs list
+                //insert_into_refs(sign_elem->blk, job->blk_ref);
                 job->blk_ref->state = _REF_DIRTY;
                 job->blk_ref->blk->state = _BLK_FREE;
                 spin_unlock(&sign_elem->blk->blk_lock);
@@ -703,7 +705,7 @@ static int io_store(struct each_job *job)
                         res = -1;
                         goto out;
                 }
-                p->blk = job->blk_ref->blk;
+                p->blk = req_blk;
                 p->job = job;
                 write_to_cache(0,0,p);
         } else if (1 == res) {

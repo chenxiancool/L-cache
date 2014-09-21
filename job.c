@@ -720,6 +720,7 @@ static int io_store(struct each_job *job)
                 // nothing to do, the caller will return -1 to process_jobs,
                 // and process_jobs will push this job to the complete_jobs
                 printk("L-CACHE : io_store return -1");
+                spin_unlock(&req_blk->blk_lock);
                 res = -1;
         }
 

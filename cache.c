@@ -314,6 +314,7 @@ static int aht_hit_write(struct cache_ctx_ctrl *ctx, struct bio *bio,
                                 res = DM_MAPIO_SUBMITTED;
                                 goto out2;
                         } else if (1 == res) {
+                                spin_unlock(&ref->blk->blk_lock);
                                 res = DM_MAPIO_REQUEUE; 
                                 goto out1;
                         } else {        // res == 0
